@@ -150,6 +150,29 @@ void adios2stream::EndStep()
    active_step = false;
 }
 
+size_t adios2stream::CurrentStep() const noexcept
+{
+   return engine.CurrentStep();
+}
+
+void adios2stream::Close()
+{
+   if (engine)
+   {
+      adios2::Attribute<std::string> vtkSchema =
+         io.InquireAttribute<std::string>("vtk.xml");
+      if (!vtkSchema)
+      {
+         io.DefineAttribute<std::string>("vtk.xml", VTKSchema() );
+      }
+      engine.Close();
+   }
+   if (adios)
+   {
+      adios.reset();
+   }
+}
+
 
 // PROTECTED (accessible by friend classes)
 int32_t adios2stream::GLVISToVTKType(
@@ -169,6 +192,7 @@ int32_t adios2stream::GLVISToVTKType(
          break;
       case Geometry::Type::SQUARE:
          vtkType = 8;
+         //vtkType = 9;
          break;
       case Geometry::Type::TETRAHEDRON:
          vtkType = 10;
@@ -205,107 +229,117 @@ noexcept
 
 void adios2stream::Print(const Mesh& mesh, const mode print_mode)
 {
-   const bool isConstantType = IsConstantElementType(mesh.elements);
-
-   if (!is_mesh_defined)
+   try
    {
-      io.DefineAttribute<std::string>("info/format", "MFEM ADIOS2 BP");
-      io.DefineAttribute<std::string>("info/version", "0.1");
-      io.DefineAttribute<uint32_t>("dimension",
-                                   static_cast<int32_t>(mesh.Dimension()) );
+      const bool isConstantType = IsConstantElementType(mesh.elements);
 
-      // vertices
-      io.DefineVariable<uint32_t>("NumOfVertices", {adios2::LocalValueDim});
-      if (mesh.Nodes == NULL)
+      if (!is_mesh_defined)
       {
-         io.DefineVariable<double>(
-         "mesh/vertices", {}, {},
-         {static_cast<size_t>(mesh.NumOfVertices), static_cast<size_t>(mesh.spaceDim)});
+         io.DefineAttribute<std::string>("info/format", "MFEM ADIOS2 BP");
+         io.DefineAttribute<std::string>("info/version", "0.1");
+         io.DefineAttribute<uint32_t>("dimension",
+                                      static_cast<int32_t>(mesh.Dimension()) );
+
+         // vertices
+         io.DefineVariable<uint32_t>("NumOfVertices", {adios2::LocalValueDim});
+         if (mesh.Nodes == NULL)
+         {
+            io.DefineVariable<double>(
+            "mesh/vertices", {}, {},
+            {static_cast<size_t>(mesh.NumOfVertices), static_cast<size_t>(mesh.spaceDim)});
+         }
+
+         // elements
+         io.DefineVariable<uint32_t>("NumOfElements", {adios2::LocalValueDim});
+
+         const size_t nElements = static_cast<size_t>(mesh.NumOfElements);
+         const size_t nElementVertices =
+            static_cast<size_t>(mesh.elements[0]->GetNVertices());
+
+         if (isConstantType)
+         {
+            io.DefineVariable<uint64_t>("connectivity", {}, {},
+            {nElements, nElementVertices+1});
+            io.DefineVariable<uint32_t>("types");
+         }
+         else
+         {
+            throw std::invalid_argument("MFEM::adios2stream ERROR: non-constant element types not yet implemented\n");
+         }
+         is_mesh_defined = true;
       }
 
-      // elements
-      io.DefineVariable<uint32_t>("NumOfElements", {adios2::LocalValueDim});
-
-      const size_t nElements = static_cast<size_t>(mesh.NumOfElements);
-      const size_t nElementVertices =
-         static_cast<size_t>(mesh.elements[0]->GetNVertices());
-
-      if (isConstantType)
+      if (!engine) // if Engine is closed
       {
-         io.DefineVariable<uint64_t>("connectivity", {}, {},
-         {nElements, nElementVertices+1});
-         io.DefineVariable<uint32_t>("types");
+         engine = io.Open(name, adios2::Mode::Write);
+      }
+
+      engine.Put("NumOfElements", static_cast<uint32_t>(mesh.NumOfElements));
+      engine.Put("NumOfVertices", static_cast<uint32_t>(mesh.NumOfVertices));
+
+      const uint32_t vtkType = GLVISToVTKType(static_cast<int>
+                                              (mesh.elements[0]->GetGeometryType()));
+      engine.Put("types", vtkType);
+
+      if (mesh.Nodes == NULL)
+      {
+         adios2::Variable<double> varVertices =
+            io.InquireVariable<double>("vertices");
+         if (!varVertices)
+         {
+            varVertices = io.DefineVariable<double>("vertices", {}, {},
+            {
+               static_cast<size_t>(mesh.NumOfVertices),
+               static_cast<size_t>(mesh.spaceDim)
+            });
+         }
+
+         adios2::Variable<double>::Span spanVertices = engine.Put(varVertices);
+         // vertices
+         for (int v = 0; v < mesh.NumOfVertices; ++v)
+         {
+            for (int coord = 0; coord < mesh.spaceDim; ++coord)
+            {
+               spanVertices[v * mesh.spaceDim + coord] = mesh.vertices[v](coord);
+            }
+         }
       }
       else
       {
-         throw std::invalid_argument("MFEM::adios2stream ERROR: non-constant element types not yet implemented\n");
-      }
-      is_mesh_defined = true;
-   }
-
-   if (!engine) // if Engine is closed
-   {
-      engine = io.Open(name, adios2::Mode::Write);
-   }
-
-   engine.Put("NumOfElements", static_cast<uint32_t>(mesh.NumOfElements));
-   engine.Put("NumOfVertices", static_cast<uint32_t>(mesh.NumOfVertices));
-
-   const uint32_t vtkType = GLVISToVTKType(static_cast<int>
-                                           (mesh.elements[0]->GetGeometryType()));
-   engine.Put("types", vtkType);
-
-   if (mesh.Nodes == NULL)
-   {
-      adios2::Variable<double> varVertices =
-         io.InquireVariable<double>("vertices");
-      if (!varVertices)
-      {
-         varVertices = io.DefineVariable<double>("vertices", {}, {},
-         {
-            static_cast<size_t>(mesh.NumOfVertices),
-            static_cast<size_t>(mesh.spaceDim)
-         });
+         mesh.Nodes->Save(*this, "vertices", data_type::none);
       }
 
-      adios2::Variable<double>::Span spanVertices = engine.Put(varVertices);
-      // vertices
-      for (int v = 0; v < mesh.NumOfVertices; ++v)
+      // use Span to save "vertices" and "connectivity"
+      // from non-contiguous  "vertices" and "elements" arrays
+      adios2::Variable<uint64_t> varConnectivity =
+         io.InquireVariable<uint64_t>("connectivity");
+      adios2::Variable<uint64_t>::Span spanConnectivity = engine.Put<uint64_t>
+                                                          (varConnectivity);
+
+      // connectivity
+      size_t elementPosition = 0;
+      for (int e = 0; e < mesh.NumOfElements; ++e)
       {
-         for (int coord = 0; coord < mesh.spaceDim; ++coord)
+         const int nVertices = mesh.elements[e]->GetNVertices();
+         spanConnectivity[elementPosition] = nVertices;
+         for (int v = 0; v < nVertices; ++v)
          {
-            spanVertices[v * mesh.spaceDim + coord] = mesh.vertices[v](coord);
+            spanConnectivity[elementPosition + v + 1] = mesh.elements[e]->GetVertices()[v];
          }
+         elementPosition += nVertices + 1;
       }
-   }
-   else
-   {
-      mesh.Nodes->Save(*this, "vertices", data_type::none);
-   }
 
-   // use Span to save "vertices" and "connectivity"
-   // from non-contiguous  "vertices" and "elements" arrays
-   adios2::Variable<uint64_t> varConnectivity =
-      io.InquireVariable<uint64_t>("connectivity");
-   adios2::Variable<uint64_t>::Span spanConnectivity = engine.Put<uint64_t>
-                                                       (varConnectivity);
-
-   // connectivity
-   size_t elementPosition = 0;
-   for (int e = 0; e < mesh.NumOfElements; ++e)
-   {
-      const int nVertices = mesh.elements[e]->GetNVertices();
-      spanConnectivity[elementPosition] = nVertices;
-      for (int v = 0; v < nVertices; ++v)
+      if (print_mode == mode::sync)
       {
-         spanConnectivity[elementPosition + v + 1] = mesh.elements[e]->GetVertices()[v];
+         engine.PerformPuts();
       }
-      elementPosition += nVertices + 1;
    }
-
-   if (print_mode == mode::sync)
+   catch (std::exception& e)
    {
-      engine.PerformPuts();
+      const std::string warning =
+         "MFEM: adios2stream exception caught, removing directory: " + name + "," +
+         e.what();
+      mfem_warning( warning.c_str());
    }
 }
 

@@ -130,6 +130,12 @@ public:
    /** Ends the current step, by default transports the data */
    void EndStep();
 
+   /** Return the current step between BeginStep and EndStep */
+   size_t CurrentStep() const noexcept;
+
+   /** Finished interaction with adios2stream and flushes the data */
+   void Close();
+
 protected:
 
    std::set<std::string> point_data;
