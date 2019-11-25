@@ -14,7 +14,7 @@ int main(int argc, char *argv[])
 {
    // 1. Parse command-line options.
    const char *mesh_file = "../data/quad-pFEM.mesh";
-   int order = 2;
+   int order =3;
    bool static_cond = false;
    bool pa = false;
    const char *device_config = "cpu";
@@ -140,12 +140,17 @@ int main(int argc, char *argv[])
 
    Array<int> dofs;
    fespace->GetEdgeDofs(0, dofs);
-   cP->Add(dofs[2],dofs[0], 1.0/2.0);
-   cP->Add(dofs[2],dofs[1], 1.0/2.0);
+
+   double coef1 = -1.0/9.0 * 1.0 + 8.0/9.0 * -1.0/4.0 + 2.0/9.0 * 0.0;
+   double coef2 = -1.0/9.0 * 0.0 + 8.0/9.0 *  9.0/8.0 + 2.0/9.0 * 0.0;
+   double coef4 = -1.0/9.0 * 0.0 + 8.0/9.0 *  1.0/8.0 + 2.0/9.0 * 1.0;
+   cP->Add(dofs[3],dofs[0], coef1);
+   cP->Add(dofs[3],dofs[1], coef4);
+   cP->Add(dofs[3],dofs[2], coef2);
 
    for (int i = 0, true_dof = 0; i < ndofs; i++)
    {
-      if (i != dofs[2]) cP->Add(i, true_dof++, 1.0);
+      if (i != dofs[3]) cP->Add(i, true_dof++, 1.0);
    }
    cP->Finalize();
    SparseMatrix *PT = Transpose(*cP);
@@ -230,5 +235,5 @@ int main(int argc, char *argv[])
 
 double solution(const Vector &x)
 {
-   return (1.0/4.0)*sin(0.5*M_PI*(sqrt(x(0)*x(0) + x(1)*x(1))));
+   return (1.0/4.0)*sin(2*M_PI*(sqrt(x(0)*x(0) + x(1)*x(1))));
 }
