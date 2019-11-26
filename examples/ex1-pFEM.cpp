@@ -135,24 +135,50 @@ int main(int argc, char *argv[])
 
    a->Finalize(0);
    int ndofs = fespace->GetNDofs();
-   int n_true_dofs = ndofs - 1;
+   int n_true_dofs = ndofs-1;
    SparseMatrix *cP = new SparseMatrix(ndofs, n_true_dofs);
 
    Array<int> dofs;
    fespace->GetEdgeDofs(0, dofs);
+   const FiniteElement *fe = fec->FiniteElementForGeometry(Geometry::SEGMENT);
+   const IntegrationRule &ir = fe->GetNodes();
 
-   double coef1 = -1.0/9.0 * 1.0 + 8.0/9.0 * -1.0/4.0 + 2.0/9.0 * 0.0;
-   double coef2 = -1.0/9.0 * 0.0 + 8.0/9.0 *  9.0/8.0 + 2.0/9.0 * 0.0;
-   double coef4 = -1.0/9.0 * 0.0 + 8.0/9.0 *  1.0/8.0 + 2.0/9.0 * 1.0;
-   cP->Add(dofs[3],dofs[0], coef1);
-   cP->Add(dofs[3],dofs[1], coef4);
-   cP->Add(dofs[3],dofs[2], coef2);
+   ir.Size();
+   cout << "Nodes: " << ir[0].x << endl;
+   cout << "Nodes: " << ir[1].x << endl;
+   cout << "Nodes: " << ir[2].x << endl;
+   cout << "Nodes: " << ir[3].x << endl;
 
-   for (int i = 0, true_dof = 0; i < ndofs; i++)
-   {
-      if (i != dofs[3]) cP->Add(i, true_dof++, 1.0);
-   }
+//   double coef1 = -1.0/9.0 * 1.0 + 8.0/9.0 * -1.0/4.0 + 2.0/9.0 * 0.0;
+//   double coef2 = -1.0/9.0 * 0.0 + 8.0/9.0 *  9.0/8.0 + 2.0/9.0 * 0.0;
+//   double coef4 = -1.0/9.0 * 0.0 + 8.0/9.0 *  1.0/8.0 + 2.0/9.0 * 1.0;
+//   cP->Add(dofs[3],dofs[0], coef1);
+//   cP->Add(dofs[3],dofs[1], coef4);
+//   cP->Add(dofs[3],dofs[2], coef2);
+
+//   for (int i = 0, true_dof = 0; i < ndofs; i++)
+//   {
+//      if (i != dofs[3]) cP->Add(i, true_dof++, 1.0);
+//   }
+
+     double a2 = (1-ir[2].x) * 1.0 + ir[2].x * 0.0;
+     double b2 = (1-ir[2].x) * 0.0 + ir[2].x * 1.0;
+     double a3 = (1-ir[3].x) * 1.0 + ir[3].x * 0.0;
+     double b3 = (1-ir[3].x) * 0.0 + ir[3].x * 1.0;
+     cP->Add(dofs[2],dofs[0], a2);
+     cP->Add(dofs[2],dofs[1], b2);
+     cP->Add(dofs[3],dofs[0], a3);
+     cP->Add(dofs[3],dofs[1], b3);
+
+      for (int i = 0, true_dof = 0; i < ndofs; i++)
+      {
+         if ((i != dofs[2]) && (i != dofs[3])) cP->Add(i, true_dof++, 1.0);
+         //cP->Add(i, true_dof++, 1.0);
+      }
+
+
    cP->Finalize();
+   cP->PrintMatlab();
    SparseMatrix *PT = Transpose(*cP);
    SparseMatrix *PTA = mfem::Mult(*PT, a->SpMat());
    delete PT;
@@ -201,7 +227,7 @@ int main(int argc, char *argv[])
    x.SetSize(cP->Height());
    cP->Mult(X, x);
    delete cP;
-
+   x.Print(cout,1);
 
    // 13. Save the refined mesh and the solution. This output can be viewed later
    //     using GLVis: "glvis -m refined.mesh -g sol.gf".
