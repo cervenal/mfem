@@ -14,7 +14,8 @@ int main(int argc, char *argv[])
 {
    // 1. Parse command-line options.
    const char *mesh_file = "../data/quad-pFEM.mesh";
-   int order =3;
+   int order_high = 3;
+   int order_low = 1;
    bool static_cond = false;
    bool pa = false;
    const char *device_config = "cpu";
@@ -23,7 +24,7 @@ int main(int argc, char *argv[])
    OptionsParser args(argc, argv);
    args.AddOption(&mesh_file, "-m", "--mesh",
                   "Mesh file to use.");
-   args.AddOption(&order, "-o", "--order",
+   args.AddOption(&order_high, "-o", "--order",
                   "Finite element order (polynomial degree) or -1 for"
                   " isoparametric space.");
    args.AddOption(&static_cond, "-sc", "--static-condensation", "-no-sc",
@@ -69,21 +70,12 @@ int main(int argc, char *argv[])
    // 5. Define a finite element space on the mesh. Here we use continuous
    //    Lagrange finite elements of the specified order. If order < 1, we
    //    instead use an isoparametric/isogeometric space.
-   FiniteElementCollection *fec;
-   if (order > 0)
-   {
-      fec = new H1_FECollection(order, dim);
-   }
-   else if (mesh->GetNodes())
-   {
-      fec = mesh->GetNodes()->OwnFEC();
-      cout << "Using isoparametric FEs: " << fec->Name() << endl;
-   }
-   else
-   {
-      fec = new H1_FECollection(order = 1, dim);
-   }
-   FiniteElementSpace *fespace = new FiniteElementSpace(mesh, fec);
+   FiniteElementCollection *fec_high;
+   FiniteElementCollection *fec_low;
+   fec_high = new H1_FECollection(order_high, dim);
+   fec_low = new H1_FECollection(order_low, dim);
+
+   FiniteElementSpace *fespace = new FiniteElementSpace(mesh, fec_high);
    cout << "Number of finite element unknowns: "
         << fespace->GetTrueVSize() << endl;
 
@@ -131,54 +123,60 @@ int main(int argc, char *argv[])
    Vector B, X;
 
 
-   //a->FormLinearSystem(ess_tdof_list, x, *b, A, X, B);
+//   a->FormLinearSystem(ess_tdof_list, x, *b, A, X, B);
 
    a->Finalize(0);
    int ndofs = fespace->GetNDofs();
-   int n_true_dofs = ndofs-1;
+   int n_slaves = order_high - order_low;
+   int n_true_dofs = ndofs - n_slaves;
    SparseMatrix *cP = new SparseMatrix(ndofs, n_true_dofs);
 
    Array<int> dofs;
    fespace->GetEdgeDofs(0, dofs);
-   const FiniteElement *fe = fec->FiniteElementForGeometry(Geometry::SEGMENT);
-   const IntegrationRule &ir = fe->GetNodes();
+   const FiniteElement *fe_high = fec_high->FiniteElementForGeometry(Geometry::SEGMENT);
+   const FiniteElement *fe_low = fec_low->FiniteElementForGeometry(Geometry::SEGMENT);
+   const IntegrationRule &ir = fe_high->GetNodes();
 
-   ir.Size();
-   cout << "Nodes: " << ir[0].x << endl;
-   cout << "Nodes: " << ir[1].x << endl;
-   cout << "Nodes: " << ir[2].x << endl;
-   cout << "Nodes: " << ir[3].x << endl;
 
-//   double coef1 = -1.0/9.0 * 1.0 + 8.0/9.0 * -1.0/4.0 + 2.0/9.0 * 0.0;
-//   double coef2 = -1.0/9.0 * 0.0 + 8.0/9.0 *  9.0/8.0 + 2.0/9.0 * 0.0;
-//   double coef4 = -1.0/9.0 * 0.0 + 8.0/9.0 *  1.0/8.0 + 2.0/9.0 * 1.0;
-//   cP->Add(dofs[3],dofs[0], coef1);
-//   cP->Add(dofs[3],dofs[1], coef4);
-//   cP->Add(dofs[3],dofs[2], coef2);
+   int n_master = ir.Size() - n_slaves;
 
-//   for (int i = 0, true_dof = 0; i < ndofs; i++)
-//   {
-//      if (i != dofs[3]) cP->Add(i, true_dof++, 1.0);
-//   }
+   Array<bool> is_true_dof(ndofs);
+   is_true_dof = true;
 
-     double a2 = (1-ir[2].x) * 1.0 + ir[2].x * 0.0;
-     double b2 = (1-ir[2].x) * 0.0 + ir[2].x * 1.0;
-     double a3 = (1-ir[3].x) * 1.0 + ir[3].x * 0.0;
-     double b3 = (1-ir[3].x) * 0.0 + ir[3].x * 1.0;
-     cP->Add(dofs[2],dofs[0], a2);
-     cP->Add(dofs[2],dofs[1], b2);
-     cP->Add(dofs[3],dofs[0], a3);
-     cP->Add(dofs[3],dofs[1], b3);
+   if (n_slaves > 0)
+   {
+      DenseMatrix Interpolation;
+      IsoparametricTransformation Trans;
+      Trans.SetFE(&SegmentFE);
+      Trans.SetIdentityTransformation(Geometry::SEGMENT);
+      fe_high->GetTransferMatrix(*fe_low, Trans, Interpolation);
+      DenseMatrix I_master;
+      I_master.CopyRows(Interpolation, 0, n_master-1);
+      I_master.Invert();
+      DenseMatrix I_slave;
+      I_slave.CopyRows(Interpolation, n_master, n_master + n_slaves-1);
 
-      for (int i = 0, true_dof = 0; i < ndofs; i++)
+      for (int k = 0; k < n_slaves; k++)
       {
-         if ((i != dofs[2]) && (i != dofs[3])) cP->Add(i, true_dof++, 1.0);
-         //cP->Add(i, true_dof++, 1.0);
+         for (int i = 0; i < n_master; i++)
+         {
+            double coef = 0;
+            for (int j = 0; j < n_master; j++)
+            {
+               coef += I_slave(k,j) * I_master(j,i);
+            }
+            cP->Add(dofs[n_master+k],dofs[i], coef);
+            is_true_dof[dofs[n_master+k]] = false;
+         }
       }
+   }
+   for (int i = 0, true_dof = 0; i < ndofs; i++)
+   {
+      if (is_true_dof[i]) cP->Add(i, true_dof++, 1.0);
+   }
 
 
    cP->Finalize();
-   cP->PrintMatlab();
    SparseMatrix *PT = Transpose(*cP);
    SparseMatrix *PTA = mfem::Mult(*PT, a->SpMat());
    delete PT;
@@ -187,14 +185,7 @@ int main(int argc, char *argv[])
 
    B.SetSize(cP->Width());
    cP->MultTranspose(*b, B);
-
    X.SetSize(n_true_dofs);
-
-
-
-
-
-
 
 
 
@@ -221,13 +212,12 @@ int main(int argc, char *argv[])
    }
 
    // 12. Recover the solution as a finite element grid function.
-   // a->RecoverFEMSolution(X, *b, x);
+//    a->RecoverFEMSolution(X, *b, x);
 
 
    x.SetSize(cP->Height());
    cP->Mult(X, x);
    delete cP;
-   x.Print(cout,1);
 
    // 13. Save the refined mesh and the solution. This output can be viewed later
    //     using GLVis: "glvis -m refined.mesh -g sol.gf".
@@ -252,7 +242,8 @@ int main(int argc, char *argv[])
    delete a;
    delete b;
    delete fespace;
-   if (order > 0) { delete fec; }
+   delete fec_high;
+   delete fec_low;
    delete mesh;
 
    return 0;
