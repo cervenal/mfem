@@ -17,17 +17,19 @@ using namespace mfem;
 // Exact solution to be projected
 double solution(const Vector &x);
 
+int bitCount(int n);
+
 // Computes edge self constraint matrix.
 // It enforces "edge_order" on the "edge"
 // by constraining edge functions by themselves.
-SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order);
+SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order, int bits);
 
 int main(int argc, char *argv[])
 {
    // 1. Parse command-line options.
    const char *mesh_file = "../data/quad-pFEM.mesh";
-   int order = 3;
-   int edge_order = 1;
+   int order = 4;
+   int edge_order = 2;
 
    bool static_cond = false;
    bool pa = false;
@@ -111,7 +113,7 @@ int main(int argc, char *argv[])
    Vector B, X;
 
    // Computes edge self constraint matrix.
-   SparseMatrix *cP = GetEdgeConstraint(*fespace, 0, edge_order);
+   SparseMatrix *cP = GetEdgeConstraint(*fespace, 0, edge_order, 4);
 
    SparseMatrix *PT = mfem::Transpose(*cP);
    SparseMatrix *PTA = mfem::Mult(*PT, a->SpMat());
@@ -119,14 +121,15 @@ int main(int argc, char *argv[])
    A.Reset(mfem::Mult(*PTA, *cP), false);
    delete PTA;
 
-//   // Conditioning number of the linear system
-//   // For testing of distribution of master DOFs on the edge
-//   DenseMatrix dA;
-//   spA->ToDenseMatrix(dA);
-//   double normA = dA.MaxNorm();
-//   dA.Invert();
-//   double normAinv = dA.MaxNorm();
-//   cout << "Conditionning number of A: " << normA*normAinv << endl;
+   // Conditioning number of the linear system
+   // For testing of distribution of master DOFs on the edge
+   DenseMatrix dA;
+   SparseMatrix* spA = A.As<SparseMatrix>();
+   spA->ToDenseMatrix(dA);
+   double normA = dA.MaxNorm();
+   dA.Invert();
+   double normAinv = dA.MaxNorm();
+   cout << "Conditionning number of A: " << normA*normAinv << endl;
 
    B.SetSize(cP->Width());
    cP->MultTranspose(*b, B);
@@ -191,7 +194,7 @@ int main(int argc, char *argv[])
    return 0;
 }
 
-SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order)
+SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order, int bits)
 {
    const FiniteElementCollection* fec = fespace.FEColl();
    const FiniteElement *fe = fec->FiniteElementForGeometry(Geometry::SEGMENT);
@@ -231,21 +234,48 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
       // TODO - better distribute n_master DOFs on edge
       Array<int> master_rows;
       master_rows.SetSize(n_master);
-      for (int i = 0; i < n_master; i++)
-      {
-         master_rows[i] = i;
-      }
-      // The rest are slave dofs
       Array<int> slave_rows;
       slave_rows.SetSize(n_slaves);
-      for (int i = 0; i < n_slaves; i++)
+      master_rows[0] = 0;
+      master_rows[1] = 1;
+      int k = 2, l = 0;
+      for (int i = 2; i < n_master+n_slaves; i++)
       {
-         slave_rows[i] = n_master + i;
+         int mask = 1<<(i-2);
+         if ((bits & mask)==0)
+         {
+            slave_rows[l++] = i;
+         }
+         else
+         {
+            master_rows[k++] = i;
+         }
       }
+            for (int i = 0; i < n_master; i++)
+            {
+               cout << "master " << master_rows[i] << endl;
+            }
+            for (int i = 0; i < n_slaves; i++)
+            {
+               cout << "slave " << slave_rows[i] << endl;
+            }
+
+//      for (int i = 0; i < n_master; i++)
+//      {
+//         master_rows[i] = i;
+//      }
+//      // The rest are slave dofs
+//      Array<int> slave_rows;
+//      slave_rows.SetSize(n_slaves);
+//      for (int i = 0; i < n_slaves; i++)
+//      {
+//         slave_rows[i] = n_master + i;
+//      }
       // Split the interpolation matrix into I_master and I_slave
       DenseMatrix I_master;
       I_master.CopyRows(Interpolation, master_rows);
       I_master.Invert();
+      I_master.Print();
       DenseMatrix I_slave;
       I_slave.CopyRows(Interpolation, slave_rows);
 
@@ -284,5 +314,17 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
 
 double solution(const Vector &x)
 {
-   return (1.0/4.0)*sin(2*M_PI*(sqrt(x(0)*x(0) + x(1)*x(1))));
+   return sin(2.0*M_PI*(sqrt(x(0)*x(0) + x(1)*x(1))));
 }
+
+
+int bitCount(int n)
+{
+    int count = 0;
+    while (n) {
+        n &= (n-1);
+        count++;
+    };
+    return count;
+}
+
