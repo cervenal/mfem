@@ -823,6 +823,26 @@ void DenseMatrix::Norm2(double *v) const
    }
 }
 
+double DenseMatrix::MaxNorm() const
+{
+   double norm = 0.0, row_sum;
+
+   for (int i = 0; i < Height(); i++)
+   {
+      row_sum = 0.0;
+      for (int j = 0; j < Width(); j++)
+      {
+        row_sum += (*this)(i,j);
+      }
+      if (row_sum > norm)
+      {
+         norm = row_sum;
+      }
+   }
+
+   return norm;
+}
+
 double DenseMatrix::MaxMaxNorm() const
 {
    int hw = Height()*Width();
@@ -2629,6 +2649,19 @@ void DenseMatrix::CopyRows(const DenseMatrix &A, int row1, int row2)
       for (int i = row1; i <= row2; i++)
       {
          (*this)(i-row1,j) = A(i,j);
+      }
+   }
+}
+
+void DenseMatrix::CopyRows(const DenseMatrix &A, const Array<int> &rows)
+{
+   SetSize(rows.Size(), A.Width());
+
+   for (int j = 0; j < Width(); j++)
+   {
+      for (int i = 0; i < Height(); i++)
+      {
+         (*this)(i,j) = A(rows[i],j);
       }
    }
 }

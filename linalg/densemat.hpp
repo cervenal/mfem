@@ -209,6 +209,9 @@ public:
    /// Take the 2-norm of the columns of A and store in v
    void Norm2(double *v) const;
 
+   /// Compute the maximum absolute row sum
+   double MaxNorm() const;
+
    /// Compute the norm ||A|| = max_{ij} |A_{ij}|
    double MaxMaxNorm() const;
 
@@ -304,6 +307,8 @@ public:
 
    /// Copy rows row1 through row2 from A to *this
    void CopyRows(const DenseMatrix &A, int row1, int row2);
+   /// Copy rows from array rows to *this
+   void CopyRows(const DenseMatrix &A, const Array<int> &rows);
    /// Copy columns col1 through col2 from A to *this
    void CopyCols(const DenseMatrix &A, int col1, int col2);
    /// Copy the m x n submatrix of A at row/col offsets Aro/Aco to *this
