@@ -19,17 +19,34 @@ double solution(const Vector &x);
 
 int bitCount(int n);
 
+void PCG_my(const Operator &A, Solver &B, const Vector &b, Vector &x,
+         int print_iter, int max_num_iter,
+         double RTOLERANCE, double ATOLERANCE,
+         std::ostream &out)
+{
+   CGSolver pcg;
+   pcg.SetPrintLevel(print_iter);
+   pcg.SetMaxIter(max_num_iter);
+   pcg.SetRelTol(sqrt(RTOLERANCE));
+   pcg.SetAbsTol(sqrt(ATOLERANCE));
+   pcg.SetOperator(A);
+   pcg.SetPreconditioner(B);
+   pcg.Mult(b, x);
+   out << " Number of iterations (PCG): " << pcg.GetNumIterations() << endl;
+
+}
+
 // Computes edge self constraint matrix.
 // It enforces "edge_order" on the "edge"
 // by constraining edge functions by themselves.
-SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order, int bits);
+SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order, int master_dofs, ostream &out);
 
 int main(int argc, char *argv[])
 {
    // 1. Parse command-line options.
    const char *mesh_file = "../data/quad-pFEM.mesh";
-   int order = 4;
-   int edge_order = 2;
+   int order = 5;
+   int edge_order = 3;
 
    bool static_cond = false;
    bool pa = false;
@@ -112,78 +129,90 @@ int main(int argc, char *argv[])
    OperatorPtr A;
    Vector B, X;
 
-   // Computes edge self constraint matrix.
-   SparseMatrix *cP = GetEdgeConstraint(*fespace, 0, edge_order, 4);
+   ostringstream log_name;
+   log_name << "results-ex1/log-order" << order << "-edge" << edge_order << ".txt";
+   ofstream log(log_name.str());
 
-   SparseMatrix *PT = mfem::Transpose(*cP);
-   SparseMatrix *PTA = mfem::Mult(*PT, a->SpMat());
-   delete PT;
-   A.Reset(mfem::Mult(*PTA, *cP), false);
-   delete PTA;
+   log << "Order: " << order << " Edge order: " << edge_order << endl;
 
-   // Conditioning number of the linear system
-   // For testing of distribution of master DOFs on the edge
-   DenseMatrix dA;
-   SparseMatrix* spA = A.As<SparseMatrix>();
-   spA->ToDenseMatrix(dA);
-   double normA = dA.MaxNorm();
-   dA.Invert();
-   double normAinv = dA.MaxNorm();
-   cout << "Conditionning number of A: " << normA*normAinv << endl;
-
-   B.SetSize(cP->Width());
-   cP->MultTranspose(*b, B);
-   X.SetSize(cP->Width());
-
-
-   cout << "Size of linear system: " << A->Height() << endl;
-
-   // 11. Solve the linear system A X = B.
-   if (!pa)
+   for (int i = 1; i < (1 << (order-1)); i++)
    {
-#ifndef MFEM_USE_SUITESPARSE
-      // Use a simple symmetric Gauss-Seidel preconditioner with PCG.
-      GSSmoother M((SparseMatrix&)(*A));
-      PCG(*A, M, B, X, 1, 200, 1e-12, 0.0);
-#else
-      // If MFEM was compiled with SuiteSparse, use UMFPACK to solve the system.
-      UMFPackSolver umf_solver;
-      umf_solver.Control[UMFPACK_ORDERING] = UMFPACK_ORDERING_METIS;
-      umf_solver.SetOperator(*A);
-      umf_solver.Mult(B, X);
-#endif
+      if (bitCount(i) == edge_order-1)
+      {
+         // Computes edge self constraint matrix.
+         SparseMatrix *cP = GetEdgeConstraint(*fespace, 0, edge_order, i, log);
+
+         SparseMatrix *PT = mfem::Transpose(*cP);
+         SparseMatrix *PTA = mfem::Mult(*PT, a->SpMat());
+         delete PT;
+         A.Reset(mfem::Mult(*PTA, *cP), true);
+         delete PTA;
+
+//         // Condition number of the linear system
+//         // For testing of distribution of master DOFs on the edge
+//         DenseMatrix dA;
+//         SparseMatrix* spA = A.As<SparseMatrix>();
+//         spA->ToDenseMatrix(dA);
+//         double normA = dA.MaxNorm();
+//         dA.Invert();
+//         double normAinv = dA.MaxNorm();
+//         cout << "Condition number of A: " << normA*normAinv << endl;
+
+         B.SetSize(cP->Width());
+         cP->MultTranspose(*b, B);
+         X.SetSize(cP->Width());
+         X = 0.0;
+
+
+         cout << "Size of linear system: " << A->Height() << endl;
+
+         // 11. Solve the linear system A X = B.
+         if (!pa)
+         {
+      #ifndef MFEM_USE_SUITESPARSE
+            // Use a simple symmetric Gauss-Seidel preconditioner with PCG.
+            GSSmoother M((SparseMatrix&)(*A));
+            PCG_my(*A, M, B, X, 1, 200, 1e-12, 0.0, log);
+      #else
+            // If MFEM was compiled with SuiteSparse, use UMFPACK to solve the system.
+            UMFPackSolver umf_solver;
+            umf_solver.Control[UMFPACK_ORDERING] = UMFPACK_ORDERING_METIS;
+            umf_solver.SetOperator(*A);
+            umf_solver.Mult(B, X);
+      #endif
+         }
+         else // No preconditioning for now in partial assembly mode.
+         {
+            CG(*A, B, X, 1, 2000, 1e-12, 0.0);
+         }
+
+         // 12. Recover the solution as a finite element grid function.
+         x.SetSize(cP->Height());
+         cP->Mult(X, x);
+         delete cP;
+
+         // cout << "\nL2 error = " << x.ComputeL2Error(rhs) << '\n' << endl;
+
+//   // 13. Save the refined mesh and the solution. This output can be viewed later
+//   //     using GLVis: "glvis -m refined.mesh -g sol.gf".
+//   ofstream mesh_ofs("refined.mesh");
+//   mesh_ofs.precision(8);
+//   mesh->Print(mesh_ofs);
+//   ofstream sol_ofs("sol.gf");
+//   sol_ofs.precision(8);
+//   x.Save(sol_ofs);
+
+//   // 14. Send the solution by socket to a GLVis server.
+//   if (visualization)
+//   {
+//      char vishost[] = "localhost";
+//      int  visport   = 19916;
+//      socketstream sol_sock(vishost, visport);
+//      sol_sock.precision(8);
+//      sol_sock << "solution\n" << *mesh << x << flush;
+//   }
+     }
    }
-   else // No preconditioning for now in partial assembly mode.
-   {
-      CG(*A, B, X, 1, 2000, 1e-12, 0.0);
-   }
-
-   // 12. Recover the solution as a finite element grid function.
-   x.SetSize(cP->Height());
-   cP->Mult(X, x);
-   delete cP;
-
-   cout << "\nL2 error = " << x.ComputeL2Error(rhs) << '\n' << endl;
-
-   // 13. Save the refined mesh and the solution. This output can be viewed later
-   //     using GLVis: "glvis -m refined.mesh -g sol.gf".
-   ofstream mesh_ofs("refined.mesh");
-   mesh_ofs.precision(8);
-   mesh->Print(mesh_ofs);
-   ofstream sol_ofs("sol.gf");
-   sol_ofs.precision(8);
-   x.Save(sol_ofs);
-
-   // 14. Send the solution by socket to a GLVis server.
-   if (visualization)
-   {
-      char vishost[] = "localhost";
-      int  visport   = 19916;
-      socketstream sol_sock(vishost, visport);
-      sol_sock.precision(8);
-      sol_sock << "solution\n" << *mesh << x << flush;
-   }
-
    // 15. Free the used memory.
    delete a;
    delete b;
@@ -194,7 +223,7 @@ int main(int argc, char *argv[])
    return 0;
 }
 
-SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order, int bits)
+SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order, int master_dofs, std::ostream &out)
 {
    const FiniteElementCollection* fec = fespace.FEColl();
    const FiniteElement *fe = fec->FiniteElementForGeometry(Geometry::SEGMENT);
@@ -237,29 +266,24 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
       Array<int> slave_rows;
       slave_rows.SetSize(n_slaves);
       master_rows[0] = 0;
+      out << "Eliminated DOFs: O";
       master_rows[1] = 1;
       int k = 2, l = 0;
       for (int i = 2; i < n_master+n_slaves; i++)
       {
          int mask = 1<<(i-2);
-         if ((bits & mask)==0)
+         if ((master_dofs & mask)==0)
          {
             slave_rows[l++] = i;
+            out << "X";
          }
          else
          {
             master_rows[k++] = i;
+            out << "O";
          }
       }
-            for (int i = 0; i < n_master; i++)
-            {
-               cout << "master " << master_rows[i] << endl;
-            }
-            for (int i = 0; i < n_slaves; i++)
-            {
-               cout << "slave " << slave_rows[i] << endl;
-            }
-
+      out << "O ";
 //      for (int i = 0; i < n_master; i++)
 //      {
 //         master_rows[i] = i;
@@ -275,7 +299,7 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
       DenseMatrix I_master;
       I_master.CopyRows(Interpolation, master_rows);
       I_master.Invert();
-      I_master.Print();
+
       DenseMatrix I_slave;
       I_slave.CopyRows(Interpolation, slave_rows);
 
