@@ -17,36 +17,18 @@ using namespace mfem;
 // Exact solution to be projected
 double solution(const Vector &x);
 
-int bitCount(int n);
-
-void PCG_my(const Operator &A, Solver &B, const Vector &b, Vector &x,
-         int print_iter, int max_num_iter,
-         double RTOLERANCE, double ATOLERANCE,
-         std::ostream &out)
-{
-   CGSolver pcg;
-   pcg.SetPrintLevel(print_iter);
-   pcg.SetMaxIter(max_num_iter);
-   pcg.SetRelTol(sqrt(RTOLERANCE));
-   pcg.SetAbsTol(sqrt(ATOLERANCE));
-   pcg.SetOperator(A);
-   pcg.SetPreconditioner(B);
-   pcg.Mult(b, x);
-   out << " Number of iterations (PCG): " << pcg.GetNumIterations() << endl;
-
-}
 
 // Computes edge self constraint matrix.
 // It enforces "edge_order" on the "edge"
 // by constraining edge functions by themselves.
-SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order, int master_dofs, ostream &out);
+SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order);
 
 int main(int argc, char *argv[])
 {
    // 1. Parse command-line options.
    const char *mesh_file = "../data/quad-pFEM.mesh";
-   int order = 5;
-   int edge_order = 3;
+   int order = 3;
+   int edge_order = 2;
 
    bool static_cond = false;
    bool pa = false;
@@ -82,6 +64,11 @@ int main(int argc, char *argv[])
    //    the same code.
    Mesh *mesh = new Mesh(mesh_file, 1, 1);
    int dim = mesh->Dimension();
+
+   Array<int> ref;
+   ref.SetSize(1);
+   ref[0] = 0;
+   mesh->GeneralRefinement(ref);
 
    // 5. Define a finite element space on the mesh. Here we use continuous
    //    Lagrange finite elements of the specified order. If order < 1, we
@@ -131,50 +118,30 @@ int main(int argc, char *argv[])
    OperatorPtr A;
    Vector B, X;
 
-   ostringstream log_name;
-   log_name << "results-ex1/log-order" << order << "-edge" << edge_order << ".txt";
-   ofstream log(log_name.str());
+   // Computes constraint matrix.
+   //SparseMatrix *cP = GetEdgeConstraint(*fespace, 0, edge_order);
+   const SparseMatrix *cP = fespace->GetConformingProlongation();
 
-   log << "Order: " << order << " Edge order: " << edge_order << endl;
+   SparseMatrix *PT = mfem::Transpose(*cP);
+   SparseMatrix *PTA = mfem::Mult(*PT, a->SpMat());
+   delete PT;
+   A.Reset(mfem::Mult(*PTA, *cP), true);
+   delete PTA;
 
-   for (int i = 1; i < (1 << (order-1)); i++)
+   B.SetSize(cP->Width());
+   cP->MultTranspose(*b, B);
+   X.SetSize(cP->Width());
+   X = 0.0;
+
+   cout << "Size of linear system: " << A->Height() << endl;
+
+   // 11. Solve the linear system A X = B.
+   if (!pa)
    {
-      if (bitCount(i) == edge_order-1)
-      {
-         // Computes edge self constraint matrix.
-         SparseMatrix *cP = GetEdgeConstraint(*fespace, 0, edge_order, i, log);
-
-         SparseMatrix *PT = mfem::Transpose(*cP);
-         SparseMatrix *PTA = mfem::Mult(*PT, a->SpMat());
-         delete PT;
-         A.Reset(mfem::Mult(*PTA, *cP), true);
-         delete PTA;
-
-//         // Condition number of the linear system
-//         // For testing of distribution of master DOFs on the edge
-//         DenseMatrix dA;
-//         SparseMatrix* spA = A.As<SparseMatrix>();
-//         spA->ToDenseMatrix(dA);
-//         double normA = dA.MaxNorm();
-//         dA.Invert();
-//         double normAinv = dA.MaxNorm();
-//         cout << "Condition number of A: " << normA*normAinv << endl;
-
-         B.SetSize(cP->Width());
-         cP->MultTranspose(*b, B);
-         X.SetSize(cP->Width());
-         X = 0.0;
-
-
-         cout << "Size of linear system: " << A->Height() << endl;
-
-         // 11. Solve the linear system A X = B.
-         if (!pa)
-         {
       #ifndef MFEM_USE_SUITESPARSE
             // Use a simple symmetric Gauss-Seidel preconditioner with PCG.
             GSSmoother M((SparseMatrix&)(*A));
-            PCG_my(*A, M, B, X, 1, 200, 1e-12, 0.0, log);
+            PCG(*A, M, B, X, 1, 200, 1e-12, 0.0);
       #else
             // If MFEM was compiled with SuiteSparse, use UMFPACK to solve the system.
             UMFPackSolver umf_solver;
@@ -182,39 +149,27 @@ int main(int argc, char *argv[])
             umf_solver.SetOperator(*A);
             umf_solver.Mult(B, X);
       #endif
-         }
-         else // No preconditioning for now in partial assembly mode.
-         {
-            CG(*A, B, X, 1, 2000, 1e-12, 0.0);
-         }
-
-         // 12. Recover the solution as a finite element grid function.
-         x.SetSize(cP->Height());
-         cP->Mult(X, x);
-         delete cP;
-
-         // cout << "\nL2 error = " << x.ComputeL2Error(rhs) << '\n' << endl;
-
-//   // 13. Save the refined mesh and the solution. This output can be viewed later
-//   //     using GLVis: "glvis -m refined.mesh -g sol.gf".
-//   ofstream mesh_ofs("refined.mesh");
-//   mesh_ofs.precision(8);
-//   mesh->Print(mesh_ofs);
-//   ofstream sol_ofs("sol.gf");
-//   sol_ofs.precision(8);
-//   x.Save(sol_ofs);
-
-//   // 14. Send the solution by socket to a GLVis server.
-//   if (visualization)
-//   {
-//      char vishost[] = "localhost";
-//      int  visport   = 19916;
-//      socketstream sol_sock(vishost, visport);
-//      sol_sock.precision(8);
-//      sol_sock << "solution\n" << *mesh << x << flush;
-//   }
-     }
    }
+   else // No preconditioning for now in partial assembly mode.
+   {
+            CG(*A, B, X, 1, 2000, 1e-12, 0.0);
+   }
+
+   // 12. Recover the solution as a finite element grid function.
+   x.SetSize(cP->Height());
+   cP->Mult(X, x);
+   // delete cP;
+
+   // 14. Send the solution by socket to a GLVis server.
+   if (visualization)
+   {
+      char vishost[] = "localhost";
+      int  visport   = 19916;
+      socketstream sol_sock(vishost, visport);
+      sol_sock.precision(8);
+      sol_sock << "solution\n" << *mesh << x << flush;
+   }
+
    // 15. Free the used memory.
    delete a;
    delete b;
@@ -225,100 +180,59 @@ int main(int argc, char *argv[])
    return 0;
 }
 
-SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order, int master_dofs, std::ostream &out)
+
+SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order)
 {
+
    const FiniteElementCollection* fec = fespace.FEColl();
    const FiniteElement *fe = fec->FiniteElementForGeometry(Geometry::SEGMENT);
 
    MFEM_ASSERT(edge_order <= fe->GetOrder(), "");
-   
+
    // New finite element of lower order
-   FiniteElementCollection *fec_new = new H1_FECollection(edge_order, fe->GetDim());
+   FiniteElementCollection *fec_new = new L2_FECollection(edge_order, fe->GetDim());
    const FiniteElement *fe_new = fec_new->FiniteElementForGeometry(Geometry::SEGMENT);
 
    // Number of edge DOFs (master and slave)
    int n_master = fe_new->GetDof();
-   int n_slaves = fe->GetDof() - n_master;
+   int n_slaves = fe->GetDof();
 
    int ndofs = fespace.GetNDofs();
-   
+
+   cout << "cp height" << ndofs << endl;
+   cout << "cp width" << ndofs - 2*n_slaves + n_master << endl;
+
    // Constraint matrix
-   SparseMatrix *cP = new SparseMatrix(ndofs, ndofs - n_slaves);
+   SparseMatrix *cP = new SparseMatrix(ndofs, ndofs - 2*n_slaves + n_master);
 
    Array<int> dofs;
    fespace.GetEdgeDofs(edge, dofs);
+   cout << "cp height" << ndofs << endl;
+   cout << "cp width" << ndofs - 2*n_slaves + n_master << endl;
+
+   for (int i = 0; i < n_slaves; i++)
+   {
+     cout << "dofs[i]" << dofs[i] << endl;
+   }
+   exit(1);
 
    Array<bool> is_true_dof(ndofs);
    is_true_dof = true;
 
-   if (n_slaves > 0)
+   // Compute interpolation matrix
+   DenseMatrix Interpolation;
+   IsoparametricTransformation Trans;
+   Trans.SetFE(&SegmentFE);
+   Trans.SetIdentityTransformation(Geometry::SEGMENT);
+   fe->GetTransferMatrix(*fe_new, Trans, Interpolation);
+
+   for (int i = 0; i < n_slaves; i++)
    {
-      // Compute interpolation matrix
-      DenseMatrix Interpolation;
-
-      IsoparametricTransformation Trans;
-      Trans.SetFE(&SegmentFE);
-      Trans.SetIdentityTransformation(Geometry::SEGMENT);
-      fe->GetTransferMatrix(*fe_new, Trans, Interpolation);
-
-      // Choose master DOFs (the first n_master of dofs)
-      // TODO - better distribute n_master DOFs on edge
-      Array<int> master_rows;
-      master_rows.SetSize(n_master);
-      Array<int> slave_rows;
-      slave_rows.SetSize(n_slaves);
-      master_rows[0] = 0;
-      out << "Eliminated DOFs: O";
-      master_rows[1] = 1;
-      int k = 2, l = 0;
-      for (int i = 2; i < n_master+n_slaves; i++)
+      for (int j = 0; j < n_master; j++)
       {
-         int mask = 1<<(i-2);
-         if ((master_dofs & mask)==0)
-         {
-            slave_rows[l++] = i;
-            out << "X";
-         }
-         else
-         {
-            master_rows[k++] = i;
-            out << "O";
-         }
+         cP->Add(dofs[i], ndofs - 2*n_slaves + j, Interpolation(i,j));
       }
-      out << "O ";
-//      for (int i = 0; i < n_master; i++)
-//      {
-//         master_rows[i] = i;
-//      }
-//      // The rest are slave dofs
-//      Array<int> slave_rows;
-//      slave_rows.SetSize(n_slaves);
-//      for (int i = 0; i < n_slaves; i++)
-//      {
-//         slave_rows[i] = n_master + i;
-//      }
-      // Split the interpolation matrix into I_master and I_slave
-      DenseMatrix I_master;
-      I_master.CopyRows(Interpolation, master_rows);
-      I_master.Invert();
-
-      DenseMatrix I_slave;
-      I_slave.CopyRows(Interpolation, slave_rows);
-
-      // Compute constraint coefficients by (I_slave)*(I_master)^{-1}
-      for (int k = 0; k < n_slaves; k++)
-      {
-         for (int i = 0; i < n_master; i++)
-         {
-            double coef = 0;
-            for (int j = 0; j < n_master; j++)
-            {
-               coef += I_slave(k,j) * I_master(j,i);
-            }
-            cP->Add(dofs[slave_rows[k]], dofs[i], coef);
-         }
-         is_true_dof[dofs[slave_rows[k]]] = false;
-      }
+      is_true_dof[dofs[i]] = false;
    }
    // Other dofs are not constrained
    for (int i = 0, true_dof = 0; i < ndofs; i++)
@@ -335,8 +249,6 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
    return cP;
 
 }
-
-
 
 double solution(const Vector &x)
 {
