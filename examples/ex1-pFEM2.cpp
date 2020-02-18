@@ -27,8 +27,8 @@ int main(int argc, char *argv[])
 {
    // 1. Parse command-line options.
    const char *mesh_file = "../data/quad-pFEM.mesh";
-   int order = 3;
-   int edge_order = 2;
+   int order = 2;
+   int edge_order = 1;
 
    bool static_cond = false;
    bool pa = false;
@@ -119,9 +119,9 @@ int main(int argc, char *argv[])
    Vector B, X;
 
    // Computes constraint matrix.
-   //SparseMatrix *cP = GetEdgeConstraint(*fespace, 0, edge_order);
-   const SparseMatrix *cP = fespace->GetConformingProlongation();
-
+   SparseMatrix *cP = GetEdgeConstraint(*fespace, 0, edge_order);
+   //const SparseMatrix *cP = fespace->GetConformingProlongation();
+   //cP->Print();
    SparseMatrix *PT = mfem::Transpose(*cP);
    SparseMatrix *PTA = mfem::Mult(*PT, a->SpMat());
    delete PT;
@@ -183,70 +183,200 @@ int main(int argc, char *argv[])
 
 SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order)
 {
-
    const FiniteElementCollection* fec = fespace.FEColl();
+   Mesh* mesh = fespace.GetMesh();
    const FiniteElement *fe = fec->FiniteElementForGeometry(Geometry::SEGMENT);
 
    MFEM_ASSERT(edge_order <= fe->GetOrder(), "");
 
-   // New finite element of lower order
-   FiniteElementCollection *fec_new = new L2_FECollection(edge_order, fe->GetDim());
-   const FiniteElement *fe_new = fec_new->FiniteElementForGeometry(Geometry::SEGMENT);
+   Array<int> master_dofs, slave_dofs;
 
-   // Number of edge DOFs (master and slave)
-   int n_master = fe_new->GetDof();
-   int n_slaves = fe->GetDof();
+   IsoparametricTransformation T;
+   DenseMatrix I;
 
    int ndofs = fespace.GetNDofs();
 
-   cout << "cp height" << ndofs << endl;
-   cout << "cp width" << ndofs - 2*n_slaves + n_master << endl;
-
-   // Constraint matrix
-   SparseMatrix *cP = new SparseMatrix(ndofs, ndofs - 2*n_slaves + n_master);
-
-   Array<int> dofs;
-   fespace.GetEdgeDofs(edge, dofs);
-   cout << "cp height" << ndofs << endl;
-   cout << "cp width" << ndofs - 2*n_slaves + n_master << endl;
-
-   for (int i = 0; i < n_slaves; i++)
-   {
-     cout << "dofs[i]" << dofs[i] << endl;
-   }
-   exit(1);
+   const NCMesh::NCList &list = mesh->ncmesh->GetNCList(1);
 
    Array<bool> is_true_dof(ndofs);
    is_true_dof = true;
 
-   // Compute interpolation matrix
-   DenseMatrix Interpolation;
-   IsoparametricTransformation Trans;
-   Trans.SetFE(&SegmentFE);
-   Trans.SetIdentityTransformation(Geometry::SEGMENT);
-   fe->GetTransferMatrix(*fe_new, Trans, Interpolation);
+   SparseMatrix deps(ndofs);
 
-   for (int i = 0; i < n_slaves; i++)
+   for (unsigned mi = 0; mi < list.masters.size(); mi++)
    {
-      for (int j = 0; j < n_master; j++)
+      FiniteElementCollection *fec_new = new H1_FECollection(edge_order, fe->GetDim());
+      const FiniteElement *fe_new = fec_new->FiniteElementForGeometry(Geometry::SEGMENT);
+      T.SetFE(&SegmentFE);
+      T.SetIdentityTransformation(Geometry::SEGMENT);
+      fe->GetTransferMatrix(*fe_new, T, I);     
+      I.Print();
+      const NCMesh::Master &master = list.masters[mi];
+      fespace.GetEdgeDofs(master.index, master_dofs);
+      if (!master_dofs.Size()) { continue; }
+      
+      int n_virtual = fe_new->GetDof();
+      
+      for (int i = 0; i < master_dofs.Size(); i++)
       {
-         cP->Add(dofs[i], ndofs - 2*n_slaves + j, Interpolation(i,j));
+         for (int j = 0; j < n_virtual; j++)
+         {
+           if (std::abs(I(i, j)) > 1e-12)
+            {
+              deps.Add(master_dofs[i], ndofs + j, I(i, j));
+            }
+         }
+         is_true_dof[master_dofs[i]] = false;         
       }
-      is_true_dof[dofs[i]] = false;
+      deps.Print();
+
+      if (!fe) { continue; }
+
+
+      for (int si = master.slaves_begin; si < master.slaves_end; si++)
+      {        
+         const NCMesh::Slave &slave = list.slaves[si];
+         fespace.GetEdgeDofs(slave.index, slave_dofs);
+         if (!slave_dofs.Size()) { continue; }
+
+         slave.OrientedPointMatrix(T.GetPointMat());
+         T.FinalizeTransformation();
+         //fe->GetLocalInterpolation(T, I);
+         fe->GetTransferMatrix(*fe_new, T, I);
+         I.Print();
+
+         // make each slave DOF dependent on all master DOFs
+         for (int i = 0; i < slave_dofs.Size(); i++)
+         {
+            if (!deps.RowSize(slave_dofs[i])) // not processed yet?
+            {
+               for (int j = 0; j < n_virtual; j++)
+               {
+                 if (std::abs(I(i, j)) > 1e-12)
+                  {
+                    deps.Add(slave_dofs[i], ndofs + j, I(i, j));
+                  }
+               }
+               is_true_dof[slave_dofs[i]] = false;
+
+//               for (int j = 0; j < master_dofs.Size(); j++)
+//               {
+//                  if (std::abs(I(i, j)) > 1e-12)
+//                  {
+//                     if (master_dofs[j] != slave_dofs[i])
+//                     {
+//                       deps.Add(slave_dofs[i], master_dofs[j], I(i, j));
+//                     }
+//                  }
+//               }
+//               is_true_dof[slave_dofs[i]] = false;
+            }
+         }
+      }
    }
-   // Other dofs are not constrained
+   deps.Finalize();
+
+   // DOFs that stayed independent are true DOFs
+   int n_true_dofs = 0;
+   for (int i = 0; i < ndofs; i++)
+   {
+      if (!deps.RowSize(i)) { n_true_dofs++; }
+   }
+
+   // create the conforming prolongation matrix cP
+   SparseMatrix *cP = new SparseMatrix(ndofs, n_true_dofs);
+
+   // put identity in the prolongation matrices for true DOFs
    for (int i = 0, true_dof = 0; i < ndofs; i++)
    {
-      if (is_true_dof[i])
+      if (!deps.RowSize(i))
       {
          cP->Add(i, true_dof++, 1.0);
       }
    }
 
+   Array<int> cols;
+   Vector srow;
+   for (int dof = 0; dof < ndofs; dof++)
+   {
+      if (!is_true_dof[dof])
+      {
+         const int* dep_col = deps.GetRowColumns(dof);
+         const double* dep_coef = deps.GetRowEntries(dof);
+         int n_dep = deps.RowSize(dof);
+
+         for (int j = 0; j < n_dep; j++)
+         {
+            cP->GetRow(dep_col[j], cols, srow);
+            srow *= dep_coef[j];
+            cP->AddRow(dof, cols, srow);
+         }
+      }
+   }
+
    cP->Finalize();
-   delete fec_new;
 
    return cP;
+
+
+//   // New finite element of lower order
+//   FiniteElementCollection *fec_new = new L2_FECollection(edge_order, fe->GetDim());
+//   const FiniteElement *fe_new = fec_new->FiniteElementForGeometry(Geometry::SEGMENT);
+
+//   // Number of edge DOFs (master and slave)
+//   int n_master = fe_new->GetDof();
+//   int n_slaves = fe->GetDof();
+
+//   int ndofs = fespace.GetNDofs();
+
+//   cout << "cp height" << ndofs << endl;
+//   cout << "cp width" << ndofs - 2*n_slaves + n_master << endl;
+
+//   // Constraint matrix
+//   SparseMatrix *cP = new SparseMatrix(ndofs, ndofs - 2*n_slaves + n_master);
+
+//   Array<int> dofs;
+//   fespace.GetEdgeDofs(edge, dofs);
+//   cout << "cp height" << ndofs << endl;
+//   cout << "cp width" << ndofs - 2*n_slaves + n_master << endl;
+
+//   for (int i = 0; i < n_slaves; i++)
+//   {
+//     cout << "dofs[i]" << dofs[i] << endl;
+//   }
+//   exit(1);
+
+//   Array<bool> is_true_dof(ndofs);
+//   is_true_dof = true;
+
+//   // Compute interpolation matrix
+//   DenseMatrix Interpolation;
+//   IsoparametricTransformation Trans;
+//   Trans.SetFE(&SegmentFE);
+//   Trans.SetIdentityTransformation(Geometry::SEGMENT);
+//   fe->GetTransferMatrix(*fe_new, Trans, Interpolation);
+
+//   for (int i = 0; i < n_slaves; i++)
+//   {
+//      for (int j = 0; j < n_master; j++)
+//      {
+//         cP->Add(dofs[i], ndofs - 2*n_slaves + j, Interpolation(i,j));
+//      }
+//      is_true_dof[dofs[i]] = false;
+//   }
+//   // Other dofs are not constrained
+//   for (int i = 0, true_dof = 0; i < ndofs; i++)
+//   {
+//      if (is_true_dof[i])
+//      {
+//         cP->Add(i, true_dof++, 1.0);
+//      }
+//   }
+
+//   cP->Finalize();
+//   delete fec_new;
+
+//   return cP;
 
 }
 
