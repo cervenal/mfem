@@ -7,6 +7,9 @@
 // The exact solution is projected to an H1 space of order "-o"
 // This test shows how to restrict an edge "0" to the prescribed order "-eo"
 // using virtual DOFs of order "-eo"
+// Dofs on the coarse edge interpolate the virtual dofs of order "eo"
+// Dofs on the fine edge interpolate the master edge dofs (order "o") as ussual
+// (in Cp matrix they actually interpolate the virtual dofs as well)
 
 #include "mfem.hpp"
 #include <fstream>
@@ -21,7 +24,7 @@ double solution(const Vector &x);
 
 // Computes edge self constraint matrix.
 // It enforces "edge_order" on the "edge"
-// by constraining edge functions by themselves.
+// Cp matrix has "ndofs" rows and "n_truedofs" collumns (some of them are virtual)
 SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order);
 
 int main(int argc, char *argv[])
@@ -29,7 +32,7 @@ int main(int argc, char *argv[])
    // 1. Parse command-line options.
    const char *mesh_file = "../data/quad-pFEM.mesh";
    int order = 5;
-   int edge_order = 3;
+   int edge_order = 2;
 
    bool static_cond = false;
    bool pa = false;
@@ -200,9 +203,9 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
 
    const NCMesh::NCList &list = mesh->ncmesh->GetNCList(1);
 
-   Array<bool> is_virtual_dep(ndofs);
+   Array<bool> is_virtual_dep(ndofs);  // true if a dof depends on virtual dofs
    is_virtual_dep = false;
-   Array<bool> is_slave_master(list.masters.size());
+   Array<bool> is_slave_master(list.masters.size());   // true if edge is master and depends on virtual dofs
    is_slave_master = false;
 
    SparseMatrix deps(ndofs);
@@ -259,6 +262,7 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
 
    // DOFs that stayed independent are true DOFs or depend on virtual dofs
    int n_true_dofs = 0;
+
    for (int i = 0; i < ndofs; i++)
    {
       if (!deps.RowSize(i) && !is_virtual_dep[i]) { n_true_dofs++; }
@@ -268,10 +272,10 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
    cout << "n_true dofs: " << n_true_dofs << endl;
 
 
-// create the conforming prolongation matrix cP
+   // create the conforming prolongation matrix cP
    SparseMatrix *cP = new SparseMatrix(ndofs, n_true_dofs);
 
-   // put identity in the prolongation matrices for true DOFs
+   // put identity in the prolongation matrices for true DOFs (not the virtual ones)
    int true_dof = 0;
    for (int i = 0; i < ndofs; i++)
    {
@@ -284,10 +288,13 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
    Array<int> cols;
    Vector srow;
 
+   // For each master edge that depends on virtual dofs add the dependency
+   // Virtual true dofs are placed behind all the regular true dofs
    for (unsigned mi = 0; mi < list.masters.size(); mi++)
    {
       if (is_slave_master[mi])
       {
+         // Get interpolation matrix between "order" and "edge_order" DOFs
          FiniteElementCollection *fec_new = new H1_FECollection(edge_order, fe->GetDim());
          const FiniteElement *fe_new = fec_new->FiniteElementForGeometry(Geometry::SEGMENT);
          T.SetFE(&SegmentFE);
@@ -299,26 +306,35 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
          if (!master_dofs.Size()) { continue; }
 
          int n_virtual = fe_new->GetDof();
+         // All inner edge dofs depend on vertex dofs and inner virtual dofs
          for (int i = 2; i < master_dofs.Size(); i++)
          {
-            cP->GetRow(master_dofs[0], cols, srow);
-            srow *= I(i, 0);
-            cP->AddRow(master_dofs[i], cols, srow);
-            cP->GetRow(master_dofs[1], cols, srow);
-            srow *= I(i, 1);
-            cP->AddRow(master_dofs[i], cols, srow);
-            for (int j = 2; j < n_virtual; j++)
+            // dependency on vertex dofs
+            for (int j = 0; j < 2; j++)
             {
               if (std::abs(I(i, j)) > 1e-12)
-                  {
-                    cP->Add(master_dofs[i], true_dof + (j-2), I(i, j));
-                  }
+              {
+                 cP->GetRow(master_dofs[j], cols, srow);
+                 srow *= I(i, j);
+                 cP->AddRow(master_dofs[i], cols, srow);
+              }
+            }
+            // dependency on inner edge dofs
+            for (int j = 2; j < n_virtual; j++)
+            {
+               if (std::abs(I(i, j)) > 1e-12)
+               {
+                 cP->Add(master_dofs[i], true_dof + (j-2), I(i, j));
+               }
             }
          }
          true_dof = true_dof + (n_virtual-2);
+
+         delete fec_new;
       }
    }
 
+   // Process all slave dofs as ussual
    for (int dof = 0; dof < ndofs; dof++)
    {
       if (deps.RowSize(dof))
@@ -336,75 +352,13 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
       }
    }
 
-   cP->Print();
-   cP->Finalize();
+   cP->Finalize();   
    return cP;
-
-
-//   // New finite element of lower order
-//   FiniteElementCollection *fec_new = new L2_FECollection(edge_order, fe->GetDim());
-//   const FiniteElement *fe_new = fec_new->FiniteElementForGeometry(Geometry::SEGMENT);
-
-//   // Number of edge DOFs (master and slave)
-//   int n_master = fe_new->GetDof();
-//   int n_slaves = fe->GetDof();
-
-//   int ndofs = fespace.GetNDofs();
-
-//   cout << "cp height" << ndofs << endl;
-//   cout << "cp width" << ndofs - 2*n_slaves + n_master << endl;
-
-//   // Constraint matrix
-//   SparseMatrix *cP = new SparseMatrix(ndofs, ndofs - 2*n_slaves + n_master);
-
-//   Array<int> dofs;
-//   fespace.GetEdgeDofs(edge, dofs);
-//   cout << "cp height" << ndofs << endl;
-//   cout << "cp width" << ndofs - 2*n_slaves + n_master << endl;
-
-//   for (int i = 0; i < n_slaves; i++)
-//   {
-//     cout << "dofs[i]" << dofs[i] << endl;
-//   }
-//   exit(1);
-
-//   Array<bool> is_true_dof(ndofs);
-//   is_true_dof = true;
-
-//   // Compute interpolation matrix
-//   DenseMatrix Interpolation;
-//   IsoparametricTransformation Trans;
-//   Trans.SetFE(&SegmentFE);
-//   Trans.SetIdentityTransformation(Geometry::SEGMENT);
-//   fe->GetTransferMatrix(*fe_new, Trans, Interpolation);
-
-//   for (int i = 0; i < n_slaves; i++)
-//   {
-//      for (int j = 0; j < n_master; j++)
-//      {
-//         cP->Add(dofs[i], ndofs - 2*n_slaves + j, Interpolation(i,j));
-//      }
-//      is_true_dof[dofs[i]] = false;
-//   }
-//   // Other dofs are not constrained
-//   for (int i = 0, true_dof = 0; i < ndofs; i++)
-//   {
-//      if (is_true_dof[i])
-//      {
-//         cP->Add(i, true_dof++, 1.0);
-//      }
-//   }
-
-//   cP->Finalize();
-//   delete fec_new;
-
-//   return cP;
-
 }
 
 double solution(const Vector &x)
 {
-   return sin(2.0*M_PI*(sqrt(x(0)*x(0) + x(1)*x(1))));
+   return sin(3.0*M_PI*(sqrt(x(0)*x(0) + x(1)*x(1))));
 }
 
 
