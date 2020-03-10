@@ -34,8 +34,8 @@ int main(int argc, char *argv[])
    int order = 5;
    int edge_order = 3;
 
-   bool static_cond = false;
-   bool pa = false;
+   //bool static_cond = false;
+   //bool pa = false;
    const char *device_config = "cpu";
    bool visualization = true;
 
@@ -102,8 +102,17 @@ int main(int argc, char *argv[])
    //    corresponding to fespace. Initialize x with initial guess of zero,
    //    which satisfies the boundary conditions.
    GridFunction x(fespace);
+   GridFunction conforming_x(fespace);
    x = 0.0;
 
+   x(0)=1.0;
+   x(1)=-1.0;
+   x(11)=0.0;
+   x(12)=2.0;
+   x(13)=-2.0;
+   x(14)=1.0;
+   //x.Print();
+/*
    // 9. Set up the bilinear form a(.,.) on the finite element space
    //    corresponding to the Mass operator (u,v)
    BilinearForm *a = new BilinearForm(fespace);
@@ -121,11 +130,20 @@ int main(int argc, char *argv[])
    
    OperatorPtr A;
    Vector B, X;
-
+*/
    // Computes constraint matrix.
+   SparseMatrix *PR = GetEdgeConstraint(*fespace, 0, edge_order);
+
+   //const SparseMatrix *cP = fespace->GetConformingProlongation();
+//   const SparseMatrix *cR = fespace->GetConformingRestriction();
+//   SparseMatrix *PR = mfem::Mult(*cP, *cR);
+
+   PR->Mult(x, conforming_x);
+
+   /*
    SparseMatrix *cP = GetEdgeConstraint(*fespace, 0, edge_order);
    //const SparseMatrix *cP = fespace->GetConformingProlongation();
-
+   //cP->Print();
    SparseMatrix *PT = mfem::Transpose(*cP);
    SparseMatrix *PTA = mfem::Mult(*PT, a->SpMat());
    delete PT;
@@ -162,8 +180,8 @@ int main(int argc, char *argv[])
    // 12. Recover the solution as a finite element grid function.
    x.SetSize(cP->Height());
    cP->Mult(X, x);
-   delete cP;
-
+   // delete cP;
+*/
    // 14. Send the solution by socket to a GLVis server.
    if (visualization)
    {
@@ -171,18 +189,20 @@ int main(int argc, char *argv[])
       int  visport   = 19916;
       socketstream sol_sock(vishost, visport);
       sol_sock.precision(8);
-      sol_sock << "solution\n" << *mesh << x << flush;
+      //sol_sock << "solution\n" << *mesh << x << flush;
+      sol_sock << "solution\n" << *mesh << conforming_x << flush;
    }
-
+/*
    // 15. Free the used memory.
    delete a;
-   delete b;
+   delete b;*/
    delete fespace;
    delete fec;
    delete mesh;
 
    return 0;
 }
+
 
 
 SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_order)
@@ -215,7 +235,7 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
       const NCMesh::Master &master = list.masters[mi];
       fespace.GetEdgeDofs(master.index, master_dofs);
       if (!master_dofs.Size()) { continue; }
-      
+
       for (int i = 2; i < master_dofs.Size(); i++)
       {
          is_virtual_dep[master_dofs[i]] = true;
@@ -381,7 +401,9 @@ SparseMatrix* GetEdgeConstraint(FiniteElementSpace &fespace, int edge, int edge_
    cP->Finalize();
    cR->Finalize();
 
-   return cP;
+   SparseMatrix *PR = mfem::Mult(*cP, *cR);
+
+   return PR;
 }
 
 double solution(const Vector &x)
